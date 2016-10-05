@@ -1,0 +1,449 @@
+---
+title: "Predicting Fatalities in Automobile Accidents"
+author: "Sal Hernandez, Andy Richardson, Austin Zielinski"
+date: "May 13, 2016"
+output: html_document
+---
+
+```{r global_options, include=FALSE}
+knitr::opts_chunk$set(prompt=TRUE, comment="", echo=TRUE)
+```
+
+Here are the additional files and libraries used in our project:
+```{r}
+library(sas7bdat)
+source("C:\\Users\\Austin\\Documents\\mining-for-crime\\res\\lin-regr-util.R")
+library(rpart)
+library(rpart.plot) 
+```
+
+##Reading and Preprocessing the Data
+
+The preparation and manipulation of the data was a big undertaking. We wanted to be able to predict whether or not a person would die in a car accident given features related to the accident, so a natural choice for a data set is the NHTSA [GES](http://www.nhtsa.gov/NASS) data. According to the [NHTSA website](http://www.nhtsa.gov/Data/National+Automotive+Sampling+System+(NASS)/NASS+General+Estimates+System), the GES data is a nationally representative sample of car accidents which we figure is a good characteristic for predictive analysis.
+
+The three major data files are accident, person, and vehicle. Each data file contains data in the scope of it's title, for example, every row in the person table is a single person, and multiple people might share one row in the vehicle table.
+```{r}
+accident = read.sas7bdat("C:\\Users\\Austin\\Documents\\mining-for-crime\\res\\GES2014\\accident.sas7bdat")
+person = read.sas7bdat("C:\\Users\\Austin\\Documents\\mining-for-crime\\res\\GES2014\\person.sas7bdat")
+vehicle = read.sas7bdat("C:\\Users\\Austin\\Documents\\mining-for-crime\\res\\GES2014\\vehicle.sas7bdat")
+```
+
+The three tables have the feature CASENUM in common, which made merging possible. 
+```{r}
+person = merge(person, accident)
+person = merge(person, vehicle)
+```
+
+At least one feature must be added, which is a binary indicator of whether or not the person died in the accident. In the case of this particular data, the feature INJ_SEV indicates this: 4 being a fatal injury and all others being non-fatal.
+```{r}
+person$fatality = as.numeric(person$INJ_SEV == 4)
+```
+
+Next we removed features that weren't necessary. In most cases these features were combinations of other features, of imputed features that were estimated from patterns in the data, e.g., NO_INJ_IM is imputed and WEATHER is a combination of WEATHER1 and WEATHER2 meaning we don't need the other two.
+```{r}
+person = subset(person, select=-c(CASENUM,PSUSTRAT,STRATUM,WEIGHT,WKDY_IM,HOUR_IM,MINUTE_IM,EVENT1_IM,MANCOL_IM,
+                                       RELJCT1_IM,RELJCT2_IM,LGTCON_IM,WEATHR_IM,MAXSEV_IM,NO_INJ_IM,ALCHL_IM,WEATHER1,
+                                       WEATHER2,MAX_SEV,VEH_NO,AGE_IM,SEX_IM,INJSEV_IM,SEAT_IM,EJECT_IM,PERALCH_IM,
+                                       HITRUN_IM,BDYTYP_IM,MDLYR_IM,VIN,MCARR_ID,MCARR_I1,MCARR_I2,IMPACT1_IM,VEVENT_IM,
+                                       MXVSEV_IM,NUMINJ_IM,V_ALCH_IM,MAK_MOD,PCRASH1_IM,MAX_VSEV,INJ_SEV,PER_NO,STR_VEH))
+```
+
+It was at this point that we realized there was a problem with the data. Closer examination revealed that out of the 126058 rows of data in the master table, only 802 were fatality results. While the data is representative of accidents on the whole, we felt that fatality outcomes needed to be better represented to make good predictions.
+```{r}
+nrow(person)
+sum(person$fatality == 1)
+```
+
+Not only was this a hunch, but it became an actual issue when we started to build trees. The imbalance of outcomes meant that the gini index before any splitting occured was .013, and basically the result of the tree was just to predict fatality=0 because the dataset was already very "pure".
+```{r}
+2 * (802/126058) * (1 - (802/126058))
+```
+One might ask: "why use a tree then and not another model?". We'll discuss this later on when we build the model.
+
+Here is the silly result of attempting to build a tree from this data with default parameters:
+```{r}
+fit = rpart(fatality ~ ., data=person, metho="class")
+prp(fit, extra=106, varlen=-15, box.col=c("palegreen","pink")[fit$frame$yval])
+```
+
+##Fixing the Data
+
+Our solution was to fuse the general accident data with a dataset containing exclusively instances of fatalities. The [FARS](http://www.nhtsa.gov/FARS) "is a nationwide census providing NHTSA, Congress and the American public yearly data regarding fatal injuries suffered in motor vehicle traffic crashes." The additional information should help us better predict fatalities.
+```{r}
+f.accident = read.sas7bdat("C:\\Users\\Austin\\Documents\\mining-for-crime\\res\\FARS2014\\accident.sas7bdat")
+f.person = read.sas7bdat("C:\\Users\\Austin\\Documents\\mining-for-crime\\res\\FARS2014\\person.sas7bdat")
+f.vehicle = read.sas7bdat("C:\\Users\\Austin\\Documents\\mining-for-crime\\res\\FARS2014\\vehicle.sas7bdat")
+
+f.person = merge(f.person, f.accident)
+f.person = merge(f.person, f.vehicle)
+f.person$fatality = 1
+```
+
+We can then put the two tables together by their common columns using rbind.
+```{r}
+common_cols = intersect(names(person), names(f.person))
+dat = rbind(subset(person,select=common_cols),subset(f.person,select=common_cols))
+```
+
+
+The new table only has 101 features whereas the two originals had 154 and 189, but what we lost in features we gained in examples.
+
+The last operation we can perform before exploring is to factor the categorical variables. Some of the features are hybrid features, meaning for some values they're numeric and for others categorical, so we left those as numeric.
+```{r}
+names = names(dat)
+factor_names = names[-match(c("VE_FORMS","MONTH","HOUR","MINUTE","MOD_YEAR","AGE","ALC_RES","VE_TOTAL","PVH_INVL",
+                       "PEDS","PERMVIT","PERNOTMVIT","YEAR","DAY_WEEK","NUMOCCS","TRAV_SP","VNUM_LAN","VSPD_LIM"),names)]
+dat[,factor_names] = lapply(dat[,factor_names],factor)
+```
+
+
+##Data Exploration 
+
+We began with looking at the structure of the data. One of the main things that stands out is that some of the categorical variables have many possible values such as MODEL and DRUGRES. This, however, appears to be the best way to represent these features. Another point worth noting is that some of the features like DRUGRES have a 1, 2, and 3 where the number is insignificant. There could be a better way to combine these three features into 1, or use booleans to represent their information.
+```{r}
+str(dat)
+```
+
+Summary gives is insight into some features worth exploring and visualizing. It's interesting that mean of MONTH is closer to 7 than the expected mean of 6.5 meaning the months aren't evenly represented. The same goes for HOUR and MINUTE, though an uneven representation of HOUR follows common sense. Though the mean of MOD_YEAR is skewed by the category of 9999, it would be interesting to explore the relation of model year to fatality. WEATHER is also an insightful feature to look at. While clear weather is the most common, cloudy(10) and rain(2) are abundant.
+```{r}
+summary(dat)
+```
+
+We made two bar graphs of the percentages of accidents by day of the week. It's interesting to see that Friday is the worst day for non-fatal and Sunday is much lower. Fatal on the other hand sees bumps on the weekend. Possible explanations we came up with are that people are out drinking on the weekend (especially Saturday) and could be rushing to get home on Sunday from a trip and not driving carefully. The non-fatal crashes likely occur during the week because people are driving to work and are more alert during the day when the lighting is good. So crashes still happen but they're not as bad. What this doesn't represent is the amount of total driving done on these days.
+```{r}
+par(mfcol=(c(1,2)))
+barplot(table(accident$DAY_WEEK[accident$MAX_SEV != 4]) / length(accident$DAY_WEEK[accident$MAX_SEV != 4]), names.arg=c("Su","M","T","W","Th","F","Sa"), xlab="Day of the Week", ylab="% of Accidents", main ="Non-Fatal", ylim=c(0,.2), col="dark green")
+barplot(table(f.accident$DAY_WEEK) / nrow(f.accident), names.arg=c("Su","M","T","W","Th","F","Sa"),  xlab="Day of the Week", ylab="% of Accidents", main ="Fatal", ylim=c(0,.2), col="firebrick")
+```
+
+Graphs of the percentages of alcohol involvement agree with our previous assessment that alcohol plays a role in the ratios of DAY_WEEK
+```{r}
+par(mfcol=(c(1,2)))
+alcohol = as.numeric(accident$ALCOHOL[accident$MAX_SEV != 4] == 1)
+barplot(table(alcohol) / length(alcohol) * 100, ylim=c(0,100), names.arg=c("No","Yes"), col="dark green", main="Non-Fatal", ylab="% of Cases", xlab="Alcohol Involved")
+
+alcohol = as.numeric(f.accident$DRUNK_DR == 1)
+barplot(table(alcohol) / length(alcohol) * 100, ylim=c(0,100), names.arg=c("No","Yes"), col="firebrick", main="Fatal", ylab="% of cases", xlab="Alcohol Involved")
+```
+
+Given the results of the previous visualizations this isn't too suprising, but there is a spike in rainy(2), cloudy(10), and snowy(4) weather densities for fatal crashes. (1) is clear weather.
+```{r}
+par(mfcol=(c(1,2)))
+plot(density(f.accident$WEATHER), ylim=c(0,2.5), xlim=c(0,12), xlab="Weather Category", main="Non-Fatal", col="dark green")
+plot(density(accident$WEATHER), ylim=c(0,2.5), xlim=c(0,12), xlab="Weather Category", main="Fatal", col="firebrick")
+```
+
+##Constructing Data Sets
+
+We set the seed for repeatable results, and split the data using a 75/25 training/test split. We felt 75/25 is a good balance of being able to assess the model and giving it enough data to be accurate. The function split_data randomizes and divides the data according to parameters, e.g., 3/1 is 3/4, 1/4.
+```{r}
+set.seed(17)
+splits = split_data(dat, c(3,1))
+tr_dat = splits[[1]]
+te_dat = splits[[2]]
+```
+
+##Building the First Tree
+
+Earlier we mentioned that a tree was the best option for our data, this is because many of our features are hybrid features. For example, the feature ALC_RES has values 0-.94 (a numeric result of an alcohol test), but 95-99 are categories. A tree enables us to maintain both the significance of the numbers (.9 being greater than .8) but also separating categories since the tree splits on logical evaluations. 
+
+Using some familiar variables, the ones visualized included, we can construct a model that is reasonably easy to interpret.
+```{r}
+fit = rpart(fatality ~ HOUR + MINUTE + DAY_WEEK + MONTH + WEATHER, data=tr_dat, method="class")
+```
+
+The resulting tree is pretty uninspiring, and I'm guessing the accuracy is fairly low given it only splits once.
+```{r}
+prp(fit, extra=106, varlen=-15, box.col=c("palegreen","pink")[fit$frame$yval])
+```
+
+Surprisingly we still achieve ~67% accuracy using this very simple tree.
+```{r}
+predicts = predict(fit, newdata=te_dat, type="class")
+actuals = te_dat$fatality
+table(predicts, actuals)
+mean(predicts == actuals)
+```
+
+One possible way to enhance the model is to transform the moment in time features. If we set DAY_WEEK, for example, as a fraction of the week, multiply it by 2PI, and then take the sine and cosine of it, we'll have a much better representation of this feature. After it has been transformed, Sunday will be as close to Saturday as Tuesday is to Wednesday, whereas now they're on opposite ends at 1 and 7.
+```{r}
+tr_dat$month_sin = sin(tr_dat$MONTH / 12 * 2 * pi)
+tr_dat$month_cos = cos(tr_dat$MONTH / 12 * 2 * pi)
+tr_dat$hour_sin = sin(tr_dat$HOUR / 24 * 2 * pi)
+tr_dat$hour_cos = cos(tr_dat$HOUR / 24 * 2 * pi)
+tr_dat$minute_sin = sin(tr_dat$MINUTE / 60 * 2 * pi)
+tr_dat$minute_cos = cos(tr_dat$MINUTE / 60 * 2 * pi)
+tr_dat$day_week_sin = sin(tr_dat$DAY_WEEK / 7 * 2 * pi)
+tr_dat$day_week_cos = cos(tr_dat$DAY_WEEK / 7 * 2 * pi)
+
+te_dat$month_sin = sin(te_dat$MONTH / 12 * 2 * pi)
+te_dat$month_cos = cos(te_dat$MONTH / 12 * 2 * pi)
+te_dat$hour_sin = sin(te_dat$HOUR / 24 * 2 * pi)
+te_dat$hour_cos = cos(te_dat$HOUR / 24 * 2 * pi)
+te_dat$minute_sin = sin(te_dat$MINUTE / 60 * 2 * pi)
+te_dat$minute_cos = cos(te_dat$MINUTE / 60 * 2 * pi)
+te_dat$day_week_sin = sin(te_dat$DAY_WEEK / 7 * 2 * pi)
+te_dat$day_week_cos = cos(te_dat$DAY_WEEK / 7 * 2 * pi)
+```
+
+The new model should have a better concept of the closeness of moments in time. We have to split again since we changed the original data.
+```{r}
+fit2 = rpart(fatality ~ month_sin + month_cos + hour_sin + hour_cos + minute_sin + minute_cos + day_week_sin + day_week_cos + + WEATHER, data=tr_dat, method="class")
+```
+
+The transformation made the features important enough that they're now the splits on the tree.
+```{r}
+prp(fit2, extra=106, varlen=-15, box.col=c("palegreen","pink")[fit$frame$yval])
+```
+
+Hopefully there is an improvement in the accuracy as well.
+```{r}
+predicts2 = predict(fit2, newdata=te_dat, type="class")
+table(predicts2, actuals)
+mean(predicts2 == actuals)
+```
+
+Even though there was little to no improvement in overall accuracy, We did see a significant increase in our ability to classify fatal accurately. We'll show this with a precision recall visualization later.
+
+##Building a Better Tree
+
+Since the rpart algorithm has the ability to determine importance of features, it makes sense to try predicting with all features.
+```{r}
+fit3 = rpart(fatality ~ .,data = tr_dat, method="class")
+```
+
+The resulting tree is a bit more exciting than the previous ones. Even if it's hard to read.
+```{r}
+prp(fit3, extra=106, varlen=-15, box.col=c("palegreen","pink")[fit$frame$yval])
+```
+
+And the improvement in excitement results in an improvement of accuracy as well. One thing worth noting is that the confustion matrix is significantly better with this model than the previous two. The previous accuracies were (93.3, 17.7) for (non-fatal, fatal) for the first model, and (88.6, 25.2) for the second. The new accuracies are (94, 74.1) showing an immense improvement in fatality accuracy.
+```{r}
+predicts3 = predict(fit3 , newdata=te_dat, type="class")
+table(predicts3, actuals)
+mean(predicts3 == actuals)
+```
+
+##Comparing Trees and Features
+
+We can now take a look at the precision and recall of the 3 models. Black is fit1, gray is fit2, and light gray fit3
+```{r}
+precision = function(predicts, actuals) {
+  tp = sum(predicts == 1 & actuals == 1)
+  fp = sum(predicts == 1 & actuals == 0)
+  return (tp / (tp + fp))
+}
+
+recall = function(predicts, actuals) {
+  tp = sum(predicts == 1 & actuals == 1)
+  fn = sum(predicts == 0 & actuals == 1)
+  return (tp / (tp + fn))
+}
+
+precisions = c(precision(predicts, actuals), precision(predicts2, actuals), precision(predicts3, actuals))
+recalls = c(recall(predicts, actuals), recall(predicts2, actuals), recall(predicts3, actuals))
+accuracies = c(mean(predicts == actuals), mean(predicts2 == actuals), mean(predicts3 == actuals))
+
+frame = as.matrix(data.frame(precisions, recalls, accuracies))
+
+par(mfcol=c(1,1))
+barplot(frame, beside=TRUE, main="Model Metrics")
+```
+Clearly since we did better in every category, the expanded feature set is a good idea.
+
+We can analyze the summary of fit so see which features ended up being important.
+```{r}
+summary(fit3)
+```
+According to the summary, the top most important features are ATST_TYP, ALC_STATUS, ALC_RES, DSTATUS, DRUGRES1, and DRUGST1. Basically all of these are related to whether the person involved in the accident was on some sort of substance. The catch here is that not everyone in the data was a driver, but clearly whether or not you're under the influence of something will have a big impact on whether or not you will end up in a fatal accident.
+
+##Beyond the Trees
+
+In terms of where we could develop the model further, one of the best places to look is at a learning curve. The curve comes together somewhat quickly, suggesting high bias. This doesn't make sense considering trees are prone to overfitting, and we have so many features. Perhaps going forward deriving new features or acquiring more would be productive. We did lose many features when we merged the data from GES and FARS
+```{r}
+learning_curve = function(data, interval, max) {
+  splits = split_data(data, c(3,1))
+  tr_dat = splits[[1]]
+  te_dat = splits[[2]]
+  te_act = te_dat$fatality
+  num_data = nrow(tr_dat)
+  tr_errs = c()
+  te_errs = c()
+  sizes = seq(interval, max, interval)
+  for (i in sizes) {
+    dat = tr_dat[1:i,]
+    fit = rpart(fatality ~ ., data=dat, method="class")
+    tr_pred = predict(fit, type="class")
+    te_pred = predict(fit, newdata=te_dat, type="class")
+    tr_act = dat$fatality
+    tr_errs = c(tr_errs, 1-mean(tr_pred == tr_act))
+    te_errs = c(te_errs, 1-mean(te_pred == te_act))
+  }
+  plot(sizes, tr_errs, type="b", ylim=c(0, .3), xlab="training size", ylab="error", col="blue")
+  points(sizes, te_errs, type="b", col="red")
+  legend(6000, 0.25, col=c("blue", "red"), c("training set error","test set error"), lty=1)
+}
+
+learning_curve(dat,100,10000)
+```
+
+##Model 3 - Logistic Regression
+Another way to approach the problem is to think about the probability of a fatality. Logistic regression allows us to do this.
+
+When we think of deaths as a result of car accidents we start thinking of the state of the driver such as being under the influence of drugs or alcohol
+
+```{r}
+fit1 = glm(fatality ~ DRINKING+DRUGS, data=tr_dat, family=binomial)
+
+y1 = predict(fit1, newdata=te_dat, type="response")
+
+predicts = as.numeric(y1 > 0.5)
+actuals = te_dat$fatality
+
+```
+
+
+The confusion matrix reveals that there were many erroneous predictions
+
+```{r}
+conf_mtx = table(predicts, actuals)
+conf_mtx
+```
+
+
+And the success rate was ok, but it can be improved given that the error was very one sided on the confusion matrix.
+
+```{r}
+mean(predicts == actuals)
+```
+
+
+The quality of the model can also be shown in the double density plot. In the plot, the blue line represents the predicted fatality whereas red predicted no fatality. Since the threshold is set at 0.5, The fatalities(red line) should be mostly located to the right of the threshold, and the blue should be located to the left of the threshold. In this case, The number of correctly predicted fatalities seems to be correct, but the number of predicted fatalities is not accurate.
+
+```{r}
+par(mfrow=c(1,1))
+plot(density(y1[actuals == 0]), col = "blue", main = "Double density plot", xlab = "logistic regression output")
+lines(density(y1[actuals == 1]), col = "red")
+abline(v = .5, lwd=3, lty=2)
+
+```
+
+The ROC curve suggests that the classifier is working in an ok manner given that it hugs the left side briefly
+
+```{r}
+prec_recall_summary = function(predicts, actuals) {
+  thresh = seq(0, 1, length.out=50)
+  prec_rec = data.frame()
+  actuals = factor(as.numeric(actuals))
+  for (th in thresh) {
+     predicts = factor(as.numeric(y1 >= th), levels=c("0","1"))
+     prec_rec = rbind(prec_rec, as.vector(table(predicts, actuals)))
+   }
+   names(prec_rec) = c("TN", "FP", "FN", "TP")
+   prec_rec$threshold = thresh
+   prec_rec$precision = prec_rec$TP/(prec_rec$TP + prec_rec$FP)
+   prec_rec$recall    = prec_rec$TP/(prec_rec$TP + prec_rec$FN)
+   prec_rec$false_pos = prec_rec$FP/(prec_rec$FP + prec_rec$TN)
+   return(prec_rec)
+}
+prec_rec1 = prec_recall_summary(predicts, actuals)
+
+par(mfrow=c(1,1))
+
+#Normalizing Data
+fp = (prec_rec1$FP-min(prec_rec1$FP))/(max(prec_rec1$FP)-min(prec_rec1$FP))
+tp = (prec_rec1$TP-min(prec_rec1$TP))/(max(prec_rec1$TP)-min(prec_rec1$TP))
+
+#precision recall curve
+plot(fp, tp, type = "l", xlab = "true positive rate", ylab = "false positive rate", col = "red4", main = "receiver operating characteristic")
+grid(10, 10, col = "lightgray")
+```
+
+##Model 4 - Logistic Regression
+
+For this model, we will be taking advantage of out many features that the data set allowed us to aggregate. We will be taking into account features such as: The number of motor-vehicles in-transport involved in the crash, the type of weather, the roadway alignment prior to this vehicle's critical precrash event, the orientation of two motor vehicles in-transport when they are involved in the First Harmful Event of a collision crash, the body type of the car, manufacturer's model year, drunk driving, drugs, damage held by the vehicle, and many more.
+
+```{r}
+fit2 = glm(fatality ~ VE_FORMS+WEATHER+VALIGN+HARM_EV+MAN_COLL+BODY_TYP+MOD_YEAR+IMPACT1+
+            ROLLOVER+FIRE_EXP+AGE+EJECTION+DRINKING+DRUGS+LGT_COND+DEFORMED+
+            VTCONT_F+ACC_TYPE, data=tr_dat, family=binomial)
+y2 = predict(fit2, newdata=te_dat, type="response")
+
+predicts = as.numeric(y2 > 0.5)
+actuals = te_dat$fatality
+```
+
+Based on the confidence matrix, we can see that the amount of False Positives and True Negatives are low which is very good
+
+```{r}
+conf_mtx = table(predicts, actuals)
+conf_mtx
+```
+
+The success rate is of ~85% which is very good!
+
+```{r}
+mean(predicts == actuals)
+```
+
+The quality of the model can be visually confirmed wiht the double density plot. Blue Still represents no fatalities, and red still represents fatalities. This time around, we can see that the predicted fatalities mostly stay to the right of the threshhold, and the non fatalities remain mostly to the left of the threshold.
+
+```{r}
+par(mfrow=c(1,1))
+plot(density(y2[actuals == 0]), col = "blue", main = "Double density plot", xlab = "logistic regression output")
+lines(density(y2[actuals == 1]), col = "red")
+abline(v = .5, lwd=3, lty=2)
+```
+
+
+Here are the density plots for the models. The new model does not have its lines innertwine like the first model. We can definately see an improvement.
+
+```{r}
+par(mfrow=c(2,1))
+plot(density(y1[actuals == 0]), col = "blue", xlab = "logistic regression output", main = "Model using alcohol and drugs")
+lines(density(y1[actuals == 1]), col = "red")
+abline(v = .5, lwd=3, lty=2)
+
+plot(density(y2[actuals == 0]), col = "blue", xlab = "logistic regression output", main = "Model using many features")
+lines(density(y2[actuals == 1]), col = "red")
+abline(v = .5, lwd=3, lty=2)
+```
+
+Here we can see the precision recall curve that tells us that we can achieve a recall of about 19% if we are willing to settle for precision of about 95%. 
+```{r}
+prec_recall_summary = function(predicts, actuals) {
+  thresh = seq(0, 1, length.out=50)
+  prec_rec = data.frame()
+  actuals = factor(as.numeric(actuals))
+  for (th in thresh) {
+     predicts = factor(as.numeric(y2 >= th), levels=c("0","1"))
+     prec_rec = rbind(prec_rec, as.vector(table(predicts, actuals)))
+   }
+   names(prec_rec) = c("TN", "FP", "FN", "TP")
+   prec_rec$threshold = thresh
+   prec_rec$precision = prec_rec$TP/(prec_rec$TP + prec_rec$FP)
+   prec_rec$recall    = prec_rec$TP/(prec_rec$TP + prec_rec$FN)
+   prec_rec$false_pos = prec_rec$FP/(prec_rec$FP + prec_rec$TN)
+   return(prec_rec)
+}
+prec_rec2 = prec_recall_summary(predicts, actuals)
+
+par(mfrow=c(1,1))
+plot( prec_rec2$recall, prec_rec2$precision, type = "l", xlab = "recall", ylab = "precision", col = "red4", main = "precision-recall curve")
+grid(10, 10, col = "lightgray")
+```
+
+The ROC curve is very good because it hugs the left side and then sticks to the top
+```{r}
+par(mfrow=c(1,1))
+#Normalizing Data
+fp = (prec_rec2$FP-min(prec_rec2$FP))/(max(prec_rec2$FP)-min(prec_rec2$FP))
+tp = (prec_rec2$TP-min(prec_rec2$TP))/(max(prec_rec2$TP)-min(prec_rec2$TP))
+
+plot(fp, tp, type = "l", xlab = "true positive rate", ylab = "false positive rate", col = "red4", main = "receiver operating characteristic")
+grid(10, 10, col = "lightgray")
+```
+
+##Conclusion
+
+Though there are obvious links to fatalities such as drugs and alcohol, we learned that this isn't the whole story. Other factors like the type of accident, where it is, and the car being driven have a large impact as well, and it's a combination of these factors that can predict well the outcome of a person in a crash. In previous experiments it was often the case that fewer features was better, but when it came to this dataset, it seemed like we couldn't get enough features. We also learned that trees are awesome when your data isn't exactly friendly toward other classifiers. Our hybrid fatures were easily accomodated by the tree, and many of its split decision were understandable. I wouldn't say that we learned much in terms of what sorts of things contribute to fatalities, but it was surprising to see how effectively one can predict a person's fate given data about their situation.

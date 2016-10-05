@@ -1,0 +1,103 @@
+<!-- if (dirname(rstudioapi::getActiveDocumentContext()$path) != "") -->
+<!--     setwd(dirname(rstudioapi::getActiveDocumentContext()$path)) -->
+
+---
+title: "AccidentPrediction"
+author: "Austin Zielinski"
+date: "October 1, 2016"
+output: html_document
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+Additional libraries required
+```{r imports}
+library(rstudioapi)
+library(sas7bdat)
+library(rpart)
+library(rpart.plot) 
+
+source("libraries\\cross-validate.R")
+source("libraries\\data-utils.R")
+```
+
+
+```{r}
+accident.GES = read.sas7bdat("GES2014sas\\accident.sas7bdat")
+person.GES   = read.sas7bdat("GES2014sas\\person.sas7bdat")
+vehicle.GES  = read.sas7bdat("GES2014sas\\vehicle.sas7bdat")
+vision.GES   = read.sas7bdat("GES2014sas\\vision.sas7bdat")
+
+accident.FARS = read.sas7bdat("FARS2014sas\\accident.sas7bdat")
+person.FARS   = read.sas7bdat("FARS2014sas\\person.sas7bdat")
+vehicle.FARS  = read.sas7bdat("FARS2014sas\\person.sas7bdat")
+vision.FARS   = read.sas7bdat("FARS2014sas\\vision.sas7bdat")
+
+accident.2013 = read.sas7bdat("accident.sas7bdat")
+```
+
+
+```{r}
+barplot(table(accident.GES$MONTH))
+barplot(table(accident.GES$DAY_WEEK))
+barplot(table(accident.GES$HOUR))
+summary(accident.GES$MINUTE)
+barplot(table(accident.GES$MINUTE))
+
+day.agg = aggregate(accident.GES$NO_INJ_IM, list(day = accident.GES$DAY_WEEK), mean)
+
+barplot(day.agg$x, day.agg$day)
+day.agg$x
+
+unique(accident.GES$DAY_WEEK)
+unique(accident.GES$WKDY_IM)
+
+unique(accident.GES$HOUR)
+unique(accident.GES$HOUR_IM)
+
+
+accident.FARS[,"hour_of_year"] = accident.FARS$HOUR + 100*accident.FARS$DAY + 10000*accident.FARS$MONTH
+barplot(accident.FARS$FATALS, accident.FARS$hour_of_year)
+barplot(table(accident.FARS$hour_of_year))
+
+accident.FARS[,"day_of_year"] = accident.FARS$DAY + 100*accident.FARS$MONTH
+barplot(accident.FARS$FATALS, accident.FARS$day_of_year)
+barplot(table(accident.FARS$day_Of_year))
+
+sort(unique(accident.FARS$day_Of_year))
+
+
+day_of_year = accident.GES$DAY_WEEK + 100*accident.GES$MONTH
+times_of_year = sort(unique(day_of_year))
+
+
+accident.GES
+
+barplot(table(accident.GES$NO_INJ_IM))
+
+sort(names(accident.GES))
+
+unique(accident.GES$MINUTE_IM)
+unique(accident.GES$MONTH)
+```
+
+```{r}
+fit = lm(NO_INJ_IM ~ HOUR_IM + MINUTE_IM + DAY_WEEK + MONTH, data=accident.GES)
+summary(fit)
+
+fit = lm(NO_INJ_IM ~ HOUR_IM + MINUTE_IM + MONTH, data=accident.GES)
+summary(fit)
+
+data.sets = splitData(accident.GES[,c("HOUR_IM", "MINUTE_IM", "DAY_WEEK", "MONTH")], c(.6, .2))
+nrow(data.sets[[1]])
+```
+
+```{r}
+crossValidate.linreg(accident.GES, c("HOUR_IM", "MINUTE_IM", "DAY_WEEK", "MONTH"), "NO_INJ_IM", 5)
+```
+
+
