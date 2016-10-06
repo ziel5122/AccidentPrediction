@@ -1,7 +1,6 @@
-library(rstudioapi)
-if (dirname(rstudioapi::getActiveDocumentContext()$path) != "")
-  setwd(dirname(rstudioapi::getActiveDocumentContext()$path))
-setwd("/Users/austinzielinski/AccidentPrediction")
+<!-- if (dirname(rstudioapi::getActiveDocumentContext()$path) != "") -->
+<!--   setwd(dirname(rstudioapi::getActiveDocumentContext()$path)) -->
+<!-- setwd("/Users/austinzielinski/AccidentPrediction") -->
 
 ---
 title: "AccidentPrediction"
@@ -19,25 +18,26 @@ knitr::opts_chunk$set(echo = TRUE)
 Additional libraries required
 ```{r imports}
 library(e1071)
+library(randomForest)
 library(rpart)
 library(rpart.plot) 
 library(sas7bdat)
 
-source("libraries/cross-validate.R")
-source("libraries/data-utils.R")
+source("..\\libraries\\cross-validate.R")
+source("..\\libraries\\data-utils.R")
 ```
 
 
 ```{r}
-accident.GES = read.sas7bdat("GES2014sas/accident.sas7bdat")
-person.GES   = read.sas7bdat("GES2014sas/person.sas7bdat")
-vehicle.GES  = read.sas7bdat("GES2014sas/vehicle.sas7bdat")
-vision.GES   = read.sas7bdat("GES2014sas/vision.sas7bdat")
+accident.GES = read.sas7bdat("..\\GES2014sas\\accident.sas7bdat")
+person.GES   = read.sas7bdat("..\\GES2014sas\\person.sas7bdat")
+vehicle.GES  = read.sas7bdat("..\\GES2014sas\\vehicle.sas7bdat")
+vision.GES   = read.sas7bdat("..\\GES2014sas\\vision.sas7bdat")
 
-accident.FARS = read.sas7bdat("FARS2014sas/accident.sas7bdat")
-person.FARS   = read.sas7bdat("FARS2014sas/person.sas7bdat")
-vehicle.FARS  = read.sas7bdat("FARS2014sas/person.sas7bdat")
-vision.FARS   = read.sas7bdat("FARS2014sas/vision.sas7bdat")
+accident.FARS = read.sas7bdat("..\\FARS2014sas\\accident.sas7bdat")
+person.FARS   = read.sas7bdat("..\\FARS2014sas\\person.sas7bdat")
+vehicle.FARS  = read.sas7bdat("..\\FARS2014sas\\person.sas7bdat")
+vision.FARS   = read.sas7bdat("..\\FARS2014sas\\vision.sas7bdat")
 ```
 
 
@@ -60,21 +60,32 @@ unique(accident.GES$DAY_WEEK)
 unique(accident.GES$HOUR)
 unique(accident.GES$HOUR_IM)
 
-time.GES = accident.GES[,c("MONTH", "DAY_WEEK", "HOUR_IM", "injury")]
+#
+time.GES = accident.GES[,c("MONTH", "DAY_WEEK", "HOUR_IM", "NO_INJ_IM")]
+time.GES$ACC_SEV = time.GES$NO_INJ_IM
+time.GES$ACC_SEV[time.GES$NO_INJ_IM >= 2] = 2
+unique(time.GES$ACC_SEV)
+time.GES = subset(time.GES, select=-c(NO_INJ_IM))
+#
 
 time.GES.splits = splitData(time.GES, 0.75)
 time.GES.tr = time.GES.splits[[1]]
 time.GES.te = time.GES.splits[[2]]
 
-write.csv(time.GES, "time-GES.csv", rownames=FALSE)
+write.csv(time.GES, "time-GES.csv", row.names=FALSE)
 
-time2.GES = data.frame(sin(time.GES$MONTH), cos(time.GES$MONTH),
-                       sin(time.GES$DAY_WEEK), cos(time.GES$DAY_WEEK),
-                       sin(time.GES$HOUR_IM), cos(time.GES$HOUR_IM), time.GES$injury)
-write.csv(time2.GES, "time-GES2.csv", row.names=FALSE)
+num_months = length(unique(time.GES$MONTH))
+num_days = length(unique(time.GES$DAY_WEEK))
+num_hours = length(unique(time.GES$HOUR_IM))
 
-time.agg = aggregate(time.GES$injury, by=list(hour=time.GES$HOUR_IM), mean)
-barplot(time.agg$x, time.agg$hour)
+month.rad = time.GES$MONTH * 2 * pi / num_months
+day.rad = time.GES$DAY_WEEK * 2 * pi / num_days
+hour.rad = time.GES$HOUR_IM * 2 * pi / num_hours
+
+time2.GES = data.frame(sin(month.rad), cos(month.rad),
+                       sin(day.rad), cos(day.rad),
+                       sin(hour.rad), cos(hour.rad), time.GES$ACC_SEV)
+write.csv(time2.GES, "time2-GES.csv", row.names=FALSE)
 ```
 
 ```{r}
@@ -119,4 +130,64 @@ nrow(data.sets[[1]])
 crossValidate.linreg(accident.GES, c("HOUR_IM", "MINUTE_IM", "DAY_WEEK", "MONTH"), "NO_INJ_IM", 5)
 ```
 
+```{r}
+all.FARS = merge(person.FARS, accident.FARS)
+all.FARS = merge(all.FARS, vehicle.FARS)
+all.FARS = merge(all.FARS, vision.FARS)
+all.FARS$fatal = factor(as.numeric(all.FARS$INJ_SEV == 4))
+
+all.FARS = subset(all.FARS, select=-c(WORK_INJ,INJ_SEV,DOA,DEATH_DA,DEATH_MO,DEATH_YR,DEATH_MN,DEATH_TM,DEATH_HR,HISPANIC,RACE,LAG_HRS,LAG_MINS,TWAY_ID,TWAY_ID2,CERT_NO,RAIL,HOSPITAL))
+
+all.FARS.splits = splitData(all.FARS, .75)
+all.FARS.tr = all.FARS.splits[[1]]
+all.FARS.te = all.FARS.splits[[2]]
+fit = rpart(fatal ~ ., data=all.FARS.tr, method="class")
+predicts = predict(fit, newdata=all.FARS.te, type="class")
+actuals = all.FARS.te$fatal
+sum(actuals == predicts) / length(actuals)
+
+prp(fit, extra=106, varlen=-15, box.col=c("palegreen","pink")[fit$frame$yval])
+
+fit2 = randomForest(fatal ~ ., data=all.FARS.tr, ntree=1000)
+predicts2 = predict(fit2, newdata=all.FARS.te, type="class")
+sum(actuals == predicts2) / length(actuals)
+
+```
+
+```{r}
+total1 = 0
+total2 = 0
+num_trials = 100
+
+for (i in 1:num_trials) {
+    time.GES.splits = splitData(time.GES, .75)
+    time.GES.tr = time.GES.splits[[1]]
+    time.GES.te = time.GES.splits[[2]]
+    
+    fit = glm(ACC_SEV ~ ., data=time.GES.tr)
+    predicts = as.numeric(predict(fit, newdata=time.GES.te) > 0.5)
+
+    # fit = rpart(ACC_SEV ~ ., data=time.GES.tr, method="class")
+    # predicts = predict(fit, newdata=time.GES.te, type="class")
+    
+    time2.GES.splits = splitData(time2.GES, .75)
+    time2.GES.tr = time2.GES.splits[[1]]
+    time2.GES.te = time2.GES.splits[[2]]
+    
+    fit2 = glm(ACC_SEV ~ ., data=time2.GES.tr)
+    predicts2 = as.numeric(predict(fit2, newdata=time2.GES.te) > 0.5)
+
+    # fit2 = rpart(ACC_SEV ~ ., data=time2.GES.tr, method="class")
+    # predicts2 = predict(fit2, newdata=time2.GES.te, type="class")
+    
+    actuals = time.GES.te$ACC_SEV
+    total1 = total1 + sum(predicts == actuals) / length(actuals)
+    
+    actuals2 = time2.GES.te$ACC_SEV
+    total2 = total2 + sum(predicts2 == actuals2) / length(actuals2)
+}
+
+total1 / num_trials
+total2 / num_trials
+```
 
