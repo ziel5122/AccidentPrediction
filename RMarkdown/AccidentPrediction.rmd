@@ -1,6 +1,6 @@
 <!-- if (dirname(rstudioapi::getActiveDocumentContext()$path) != "") -->
 <!--   setwd(dirname(rstudioapi::getActiveDocumentContext()$path)) -->
-<!-- setwd("/Users/austinzielinski/AccidentPrediction") -->
+setwd("/Users/austinzielinski/AccidentPrediction")
 
 ---
 title: "AccidentPrediction"
@@ -23,8 +23,8 @@ library(rpart)
 library(rpart.plot) 
 library(sas7bdat)
 
-source("..\\libraries\\cross-validate.R")
-source("..\\libraries\\data-utils.R")
+source("libraries/cross-validate.R")
+source("libraries/data-utils.R")
 ```
 
 
@@ -152,6 +152,14 @@ fit2 = randomForest(fatal ~ ., data=all.FARS.tr, ntree=1000)
 predicts2 = predict(fit2, newdata=all.FARS.te, type="class")
 sum(actuals == predicts2) / length(actuals)
 
+time.GES$injury = factor(time.GES$injury)
+time.GES.splits = splitData(time.GES, .75)
+time.GES.tr = time.GES.splits[[1]]
+time.GES.te = time.GES.splits[[2]]
+fit5 = randomForest(injury ~ ., data=time.GES.tr, ntree=100, method="class")
+predicts5 = predict(fit5, newdata=time.GES.te, type="class")
+actuals5 = time.GES.te$injury
+sum(actuals5 == predicts5) / length(actuals5)
 ```
 
 ```{r}
